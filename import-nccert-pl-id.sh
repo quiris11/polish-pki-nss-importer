@@ -36,7 +36,7 @@ for arg in "$@"; do
     esac
 done
 
-NSSDB="sql:$HOME/.pki/nssdb"
+NSSDB=""  # populated by detect_nss_databases() below
 TMPDIR=$(mktemp -d)
 NCCERT_PAGE="https://nccert.pl/zaswiadczenia.htm"
 NCCERT_BASE="https://nccert.pl/files"
@@ -73,18 +73,66 @@ for cmd in curl openssl certutil; do
 done
 ok "All prerequisites present"
 
-# ── NSS database ──────────────────────────────────────────────────────────────
+# ── NSS database detection ────────────────────────────────────────────────────
+#
+# Poppler (used by GNOME Document Viewer / Evince / Okular) searches NSS DBs
+# in this priority order — first found wins, others are ignored:
+#   1. Firefox profile  (~/.mozilla/firefox/*.default*/)
+#   2. System-wide      (/etc/pki/nssdb)
+#   3. User DB          (~/.pki/nssdb)
+#
+# This script detects which DBs exist and imports into ALL of them so that
+# the correct one is populated regardless of which poppler picks up.
+
+detect_nss_databases() {
+    NSS_DBS=()
+
+    # 1. Firefox profile DBs — checked in the same order poppler searches them:
+    #
+    #  a) ~/.mozilla/firefox/          — classic path (poppler always checks this)
+    #  b) ~/.config/mozilla/firefox/   — XDG path used by Fedora; poppler checks
+    #                                    this since 26.03 (your current 26.01 does
+    #                                    NOT yet, but will after the next update)
+    #  c) Flatpak Firefox              — sandboxed under ~/.var/app/
+    #
+    # We import into all found profiles so the script stays correct regardless
+    # of which poppler version is running.
+    for profile_dir in         "$HOME"/.mozilla/firefox/*.default*/         "$HOME"/.config/mozilla/firefox/*.default*/         "$HOME"/.var/app/org.mozilla.firefox/.mozilla/firefox/*.default*/; do
+        [[ -f "${profile_dir}cert9.db" ]] && NSS_DBS+=("sql:${profile_dir}")
+    done
+
+    # 2. System-wide NSS DB
+    if [[ -f "/etc/pki/nssdb/cert9.db" ]]; then
+        NSS_DBS+=("sql:/etc/pki/nssdb")
+    fi
+
+    # 3. User NSS DB — create it if nothing else was found
+    if [[ -f "$HOME/.pki/nssdb/cert9.db" ]]; then
+        NSS_DBS+=("sql:$HOME/.pki/nssdb")
+    elif [[ ${#NSS_DBS[@]} -eq 0 ]]; then
+        echo "  No existing NSS database found — creating ~/.pki/nssdb ..."
+        mkdir -p "$HOME/.pki/nssdb"
+        certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password
+        NSS_DBS+=("sql:$HOME/.pki/nssdb")
+        ok "Created ~/.pki/nssdb"
+    fi
+}
 
 echo ""
-echo "Preparing NSS database at ~/.pki/nssdb ..."
-mkdir -p "$HOME/.pki/nssdb"
+echo "Detecting NSS databases..."
+detect_nss_databases
 
-if [[ ! -f "$HOME/.pki/nssdb/cert9.db" ]]; then
-    certutil -d "$NSSDB" -N --empty-password
-    ok "Created new NSS database"
-else
-    ok "NSS database already exists"
+if [[ ${#NSS_DBS[@]} -eq 0 ]]; then
+    err "No NSS database found and could not create one. Aborting."
+    exit 1
 fi
+
+for db in "${NSS_DBS[@]}"; do
+    ok "Found: $db"
+done
+
+# Use the first (highest-priority) DB as the primary for duplicate checks
+NSSDB="${NSS_DBS[0]}"
 
 # ── Counters ──────────────────────────────────────────────────────────────────
 
@@ -128,17 +176,31 @@ import_from_url() {
         fi
     fi
 
-    # Skip if already imported (match by nickname)
+    # Skip entirely if already present in the primary (highest-priority) DB
     if certutil -L -d "$NSSDB" 2>/dev/null | grep -qF "$nickname"; then
         ok "Already imported: $nickname"
         (( COUNT_SKIPPED++ )) || true
         return
     fi
 
-    if certutil -A -d "$NSSDB" -n "$nickname" -t "$trust" -a -i "$pem" 2>/dev/null; then
+    local any_imported=0
+    local any_failed=0
+    for db in "${NSS_DBS[@]}"; do
+        # Skip if already in this specific DB
+        if certutil -L -d "$db" 2>/dev/null | grep -qF "$nickname"; then
+            continue
+        fi
+        if certutil -A -d "$db" -n "$nickname" -t "$trust" -a -i "$pem" 2>/dev/null; then
+            any_imported=1
+        else
+            any_failed=1
+        fi
+    done
+
+    if [[ $any_imported -eq 1 ]]; then
         ok "Imported: $nickname"
         (( COUNT_IMPORTED++ )) || true
-    else
+    elif [[ $any_failed -eq 1 ]]; then
         warn "Import failed (possible duplicate key): $nickname"
         (( COUNT_FAILED++ )) || true
     fi
@@ -294,8 +356,10 @@ echo -e "  Imported : ${GREEN}${COUNT_IMPORTED}${NC}"
 echo -e "  Skipped  : ${YELLOW}${COUNT_SKIPPED}${NC} (already present)"
 echo -e "  Failed   : ${RED}${COUNT_FAILED}${NC}"
 
-section "All certificates in NSS database"
-certutil -L -d "$NSSDB"
+for db in "${NSS_DBS[@]}"; do
+    section "Certificates in: $db"
+    certutil -L -d "$db"
+done
 
 echo ""
 echo -e "${GREEN}${BOLD}Done!${NC} Restart GNOME Document Viewer and reopen your PDF."
