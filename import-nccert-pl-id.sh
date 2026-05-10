@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# import-nccert.sh
+# import-nccert-pl-id.sh
 # Downloads and imports all Polish PKI certificates into the user's
 # NSS database (~/.pki/nssdb), making them trusted by GNOME Document
 # Viewer (Evince/Papers), Okular, pdfsig, etc.
@@ -11,8 +11,8 @@
 #                                (parsed live from certyfikaty_pl.ID.txt)
 #
 # Usage:
-#   chmod +x import-nccert.sh
-#   ./import-nccert.sh
+#   chmod +x import-nccert-pl-id.sh
+#   ./import-nccert-pl-id.sh
 #
 # Requirements: curl, openssl, certutil (nss-tools)
 
