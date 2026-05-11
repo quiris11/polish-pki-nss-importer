@@ -180,20 +180,17 @@ import_from_url() {
         fi
     fi
 
-    # Skip entirely if already present in the primary (highest-priority) DB
-    if certutil -L -d "$NSSDB" 2>/dev/null | grep -qF "$nickname"; then
-        ok "Already imported: $nickname"
-        (( COUNT_SKIPPED++ )) || true
-        return
-    fi
-
     local any_imported=0
     local any_failed=0
+    local all_skipped=1
     for db in "${NSS_DBS[@]}"; do
-        # Skip if already in this specific DB
+        # Check each DB individually — a cert present in one DB may be
+        # missing from another (e.g. Firefox profile populated but
+        # /etc/pki/nssdb and ~/.pki/nssdb are empty)
         if certutil -L -d "$db" 2>/dev/null | grep -qF "$nickname"; then
-            continue
+            continue  # already in this DB, move to next
         fi
+        all_skipped=0
         if certutil -A -d "$db" -n "$nickname" -t "$trust" -a -i "$pem" 2>/dev/null; then
             any_imported=1
         else
@@ -201,7 +198,10 @@ import_from_url() {
         fi
     done
 
-    if [[ $any_imported -eq 1 ]]; then
+    if [[ $all_skipped -eq 1 ]]; then
+        ok "Already imported: $nickname"
+        (( COUNT_SKIPPED++ )) || true
+    elif [[ $any_imported -eq 1 ]]; then
         ok "Imported: $nickname"
         (( COUNT_IMPORTED++ )) || true
     elif [[ $any_failed -eq 1 ]]; then
