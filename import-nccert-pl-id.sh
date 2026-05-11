@@ -97,25 +97,29 @@ detect_nss_databases() {
     #
     # We import into all found profiles so the script stays correct regardless
     # of which poppler version is running.
+    shopt -s nullglob  # prevent literal match when no profile exists
     for profile_dir in         "$HOME"/.mozilla/firefox/*.default*/         "$HOME"/.config/mozilla/firefox/*.default*/         "$HOME"/.var/app/org.mozilla.firefox/.mozilla/firefox/*.default*/; do
         [[ -f "${profile_dir}cert9.db" ]] && NSS_DBS+=("sql:${profile_dir}")
     done
+    shopt -u nullglob
 
     # 2. System-wide NSS DB
     if [[ -f "/etc/pki/nssdb/cert9.db" ]]; then
         NSS_DBS+=("sql:/etc/pki/nssdb")
     fi
 
-    # 3. User NSS DB — create it if nothing else was found
-    if [[ -f "$HOME/.pki/nssdb/cert9.db" ]]; then
-        NSS_DBS+=("sql:$HOME/.pki/nssdb")
-    elif [[ ${#NSS_DBS[@]} -eq 0 ]]; then
-        echo "  No existing NSS database found — creating ~/.pki/nssdb ..."
+    # 3. User NSS DB — always included:
+    #   - poppler 26.01 falls through to here when it can't find the Firefox
+    #     profile (e.g. Fedora XDG path not yet supported)
+    #   - even when a Firefox profile is found, we still populate this DB so
+    #     pdfsig, Okular, and future poppler versions all work correctly
+    if [[ ! -f "$HOME/.pki/nssdb/cert9.db" ]]; then
+        echo "  ~/.pki/nssdb not found — creating ..."
         mkdir -p "$HOME/.pki/nssdb"
         certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password
-        NSS_DBS+=("sql:$HOME/.pki/nssdb")
         ok "Created ~/.pki/nssdb"
     fi
+    NSS_DBS+=("sql:$HOME/.pki/nssdb")
 }
 
 echo ""
@@ -334,19 +338,9 @@ if curl -sSf --max-time 15 -o "$PLID_LIST" "$PLID_LIST_URL" 2>/dev/null; then
     done < "$PLID_LIST"
 else
     warn "Could not fetch $PLID_LIST_URL"
-    warn "Note: repo.e-dowod.gov.pl uses plain HTTP — may be blocked by firewall/proxy."
-    warn "Falling back to built-in static list (cohorts 2019–2025)..."
-
-    for cohort in 20190221 20191207 20201202 20211204 20221126 20231125 20241116 20251122; do
-        year="${cohort:0:4}"; mm="${cohort:4:2}"; dd="${cohort:6:2}"
-        date_fmt="${year}-${mm}-${dd}"
-        for role in Authentication Authorization Presence; do
-            import_from_url \
-                "$EDOWOD_BASE/PLID_${role}_CA_${cohort}.cer" \
-                "pl.ID ${role} CA ${date_fmt}" \
-                ",,"
-        done
-    done
+    warn "repo.e-dowod.gov.pl serves over plain HTTP — may be blocked by your firewall or proxy."
+    warn "pl.ID certificates were NOT imported. Re-run the script when the server is reachable."
+    (( COUNT_FAILED++ )) || true
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
